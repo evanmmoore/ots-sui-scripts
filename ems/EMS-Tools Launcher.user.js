@@ -1009,10 +1009,11 @@ GM_addStyle(`
     .stc-g3 { display:grid;grid-template-columns:1fr 1fr 1fr;gap:0 14px; }
     .stc-f { margin-bottom:10px; }
     .stc-f label { display:block;font-size:8pt;font-weight:700;color:#1a3a5c;text-transform:uppercase;letter-spacing:.4px;margin-bottom:3px;opacity:.8;font-family:Tahoma,sans-serif; }
-    .stc-f input,.stc-f textarea { width:100%;padding:6px 9px;border:1px solid #c8d6e5;border-radius:5px;font-size:10pt;color:#1a3a5c;font-family:Tahoma,sans-serif;box-sizing:border-box;background:#fff; }
+    .stc-f input,.stc-f textarea,.stc-f select { width:100%;padding:6px 9px;border:1px solid #c8d6e5;border-radius:5px;font-size:10pt;color:#1a3a5c;font-family:Tahoma,sans-serif;box-sizing:border-box;background:#fff; }
     .stc-f textarea { resize:vertical;min-height:52px; }
-    .stc-f input:focus,.stc-f textarea:focus { outline:none;border-color:#1a3a5c;box-shadow:0 0 0 2px rgba(26,58,92,.15); }
+    .stc-f input:focus,.stc-f textarea:focus,.stc-f select:focus { outline:none;border-color:#1a3a5c;box-shadow:0 0 0 2px rgba(26,58,92,.15); }
     .stc-locked { padding:6px 9px;border:1px solid #c8d6e5;border-radius:5px;background:#f0f4f8;font-size:10pt;color:#1a3a5c;opacity:.8;font-family:Tahoma,sans-serif; }
+    .stc-f input[readonly],.stc-f textarea[readonly] { background:#f0f4f8;opacity:.8;cursor:not-allowed; }
     .stc-auto { display:inline-block;font-size:8pt;font-weight:700;background:#d1e7f5;color:#1a3a5c;border-radius:4px;padding:1px 6px;margin-left:5px;vertical-align:middle; }
     .stc-cts { display:flex;flex-wrap:wrap;gap:6px;margin-top:4px; }
     .stc-ctb { padding:5px 12px;border:1px solid #c8d6e5;border-radius:5px;font-size:9pt;font-weight:600;cursor:pointer;background:#fff;color:#1a3a5c;font-family:Tahoma,sans-serif;transition:all .12s; }
@@ -1147,6 +1148,22 @@ function stcScrapeStudents() {
     return result;
 }
 
+function stcNormalizeTitle(s) {
+    return (s||'').replace(/[®™]/g,'').replace(/\s+/g,' ').trim().toLowerCase();
+}
+
+function stcMatchCourseTitle(scraped) {
+    const norm = stcNormalizeTitle(scraped);
+    if (!norm) return '';
+    const sel = document.getElementById('stc-courseTitle');
+    if (!sel) return '';
+    for (const opt of sel.options) {
+        if (opt.disabled || !opt.value) continue;
+        if (stcNormalizeTitle(opt.value) === norm) return opt.value;
+    }
+    return '';
+}
+
 function stcParseNamesText(text) {
     const lines = text.trim().split(/\r?\n/).filter(l => l.trim());
     return lines.map(line => {
@@ -1245,7 +1262,7 @@ async function stcHandleUpload(file, statusEl, studentsArr, renderFn) {
     } catch(e) { statusEl.textContent='\u274C '+e.message; }
 }
 
-let stcStudents=[], stcPageMeta=null, stcCourseType='RFC', stcCertAchieved='no', stcLastCi=null;
+let stcStudents=[], stcPageMeta=null, stcCourseType='RFC', stcCertAchieved='yes', stcLastCi=null;
 
 const STC_COURSE_TYPE_HTML = STC_COURSE_TYPES.map(t=>`<button class="stc-ctb${t==='RFC'?' sel':''}" data-ct="${t}">${t}</button>`).join('');
 
@@ -1314,17 +1331,25 @@ function buildSTCPanel() {
                             <div class="stc-f"><label>5. Certified hours</label><input id="stc-certHours" placeholder="e.g. 21"></div>
                             <div class="stc-f"><label>6. Expiration date</label><input id="stc-expDate" type="date"></div>
                         </div>
-                        <div class="stc-f"><label>8. Course title <span class="stc-auto">AUTO</span></label><input id="stc-courseTitle"></div>
+                        <div class="stc-f"><label>8. Course title <span class="stc-auto">AUTO</span></label><select id="stc-courseTitle">
+                            <option value="" disabled selected>— select course —</option>
+                            <option>PSFA Optional Skill - Santa Barbara County Naloxone</option>
+                            <option>California Title 22 Public Safety First Aid</option>
+                            <option>California Title 22 Public Safety First Aid with Naloxone 24</option>
+                            <option>California Title 22 Public Safety First Aid - Renewal</option>
+                            <option>American Heart Association BLS CPR with First Aid</option>
+                            <option>California Title 22 Public Safety First Aid with Naloxone - Renewal</option>
+                        </select></div>
                     </div>
                     <div class="stc-sec"><div class="stc-sec-title">Field 9 &mdash; Training provider (locked)</div><div class="stc-locked">&#x1F512; Safety Unlimited, Inc.</div></div>
                     <div class="stc-sec">
                         <div class="stc-sec-title">Fields 10 &ndash; 12</div>
                         <div class="stc-f"><label>10. Was a certification achieved?</label>
-                            <div class="stc-yn"><button class="stc-ynb" data-yn="yes">Yes</button><button class="stc-ynb sel" data-yn="no">No</button></div>
+                            <div class="stc-yn"><button class="stc-ynb sel" data-yn="yes">Yes</button><button class="stc-ynb" data-yn="no">No</button></div>
                         </div>
-                        <div class="stc-f" id="stc-cdesc-wrap" style="display:none"><label>Describe</label><input id="stc-certDesc" placeholder="e.g. First Aid/CPR"></div>
+                        <div class="stc-f" id="stc-cdesc-wrap"><label>Describe</label><input id="stc-certDesc" placeholder="e.g. First Aid/CPR" value="Cal PSFA" readonly tabindex="-1"></div>
                         <div class="stc-f"><label>11. Instructors</label><textarea id="stc-instructors" placeholder="List all instructors"></textarea></div>
-                        <div class="stc-f"><label>12. Key performance objectives / competencies</label><textarea id="stc-objectives" placeholder="2-3 most important competencies"></textarea></div>
+                        <div class="stc-f"><label>12. Key performance objectives / competencies</label><textarea id="stc-objectives" placeholder="2-3 most important competencies" readonly tabindex="-1">see attachment</textarea></div>
                     </div>
                     <div class="stc-sec">
                         <div class="stc-sec-title">Fields 16 &amp; 17 &mdash; Same for all students</div>
@@ -1439,7 +1464,16 @@ function wireSTCPanel() {
         btn.addEventListener('click',()=>{document.querySelectorAll('.stc-ctb').forEach(b=>b.classList.remove('sel'));btn.classList.add('sel');stcCourseType=btn.dataset.ct;});
     });
     document.querySelectorAll('.stc-ynb').forEach(btn=>{
-        btn.addEventListener('click',()=>{document.querySelectorAll('.stc-ynb').forEach(b=>b.classList.remove('sel'));btn.classList.add('sel');stcCertAchieved=btn.dataset.yn;document.getElementById('stc-cdesc-wrap').style.display=stcCertAchieved==='yes'?'':'none';});
+        btn.addEventListener('click',()=>{
+            document.querySelectorAll('.stc-ynb').forEach(b=>b.classList.remove('sel'));
+            btn.classList.add('sel');
+            stcCertAchieved=btn.dataset.yn;
+            document.getElementById('stc-cdesc-wrap').style.display=stcCertAchieved==='yes'?'':'none';
+            if (stcCertAchieved==='yes') {
+                const desc = document.getElementById('stc-certDesc');
+                if (desc && !desc.value.trim()) desc.value = 'Cal PSFA';
+            }
+        });
     });
 
     function stcFmtDate(v){if(!v)return '';const[y,m,d]=v.split('-');return `${m}/${d}/${y}`;}
@@ -1447,7 +1481,7 @@ function wireSTCPanel() {
         document.getElementById('stc-startDate').value=meta.startDate||'';
         document.getElementById('stc-endDate').value=meta.endDate||'';
         document.getElementById('stc-location').value=meta.location||'';
-        document.getElementById('stc-courseTitle').value=meta.courseTitle||'';
+        document.getElementById('stc-courseTitle').value=stcMatchCourseTitle(meta.courseTitle);
         document.getElementById('stc-agency').value=meta.agency||'';
     }
     function stcBuildCi(){
@@ -1526,17 +1560,19 @@ function wireSTCPanel() {
     });
     document.getElementById('stc-redownload').addEventListener('click',async()=>{if(stcLastCi)await stcFillAndDownload(stcLastCi,stcStudents);});
     document.getElementById('stc-restart').addEventListener('click',()=>{
-        stcStudents=[];stcPageMeta=null;stcCourseType='RFC';stcCertAchieved='no';stcLastCi=null;
+        stcStudents=[];stcPageMeta=null;stcCourseType='RFC';stcCertAchieved='yes';stcLastCi=null;
         document.getElementById('stc-verify-wrap').style.display='none';
         document.getElementById('stc-sub-upload').style.display='none';
         document.getElementById('stc-sub-paste').style.display='none';
         document.getElementById('stc-paste-area').value='';
-        ['stc-certNum','stc-startDate','stc-endDate','stc-location','stc-certHours','stc-expDate','stc-courseTitle','stc-certDesc','stc-instructors','stc-objectives','stc-agency','stc-hours'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
+        ['stc-certNum','stc-startDate','stc-endDate','stc-location','stc-certHours','stc-expDate','stc-courseTitle','stc-instructors','stc-agency','stc-hours'].forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
+        const desc=document.getElementById('stc-certDesc');if(desc)desc.value='Cal PSFA';
+        const obj=document.getElementById('stc-objectives');if(obj)obj.value='see attachment';
         document.querySelectorAll('.stc-ctb').forEach(b=>b.classList.remove('sel'));
         document.querySelector('[data-ct="RFC"]').classList.add('sel');
         document.querySelectorAll('.stc-ynb').forEach(b=>b.classList.remove('sel'));
-        document.querySelector('[data-yn="no"]').classList.add('sel');
-        document.getElementById('stc-cdesc-wrap').style.display='none';
+        document.querySelector('[data-yn="yes"]').classList.add('sel');
+        document.getElementById('stc-cdesc-wrap').style.display='';
         stcSetStep(1);stcPageMeta=stcScrapePageMeta();stcPopulateAuto(stcPageMeta);
     });
     document.getElementById('stc-pc').addEventListener('click',()=>ov.classList.remove('open'));
@@ -1608,7 +1644,7 @@ function wireSTCPanel() {
 function openSTCRoster() {
     if (!GEMINI_API_KEY_STC) { GEMINI_API_KEY_STC = prompt('Enter your Gemini API key:'); if (GEMINI_API_KEY_STC) { GM_setValue('geminiKey', GEMINI_API_KEY_STC); GR_GEMINI_KEY = GEMINI_API_KEY_STC; } }
     buildSTCPanel();
-    if (!stcPageMeta) { stcPageMeta=stcScrapePageMeta(); const ov=document.getElementById('stc-overlay'); if(ov){ ['stc-startDate','stc-endDate','stc-location','stc-courseTitle','stc-agency'].forEach(id=>{const el=document.getElementById(id);if(el&&!el.value){const key=id.replace('stc-','').replace('startDate','startDate').replace('endDate','endDate').replace('courseTitle','courseTitle').replace('agency','agency');}}); if(stcPageMeta.startDate)document.getElementById('stc-startDate').value=stcPageMeta.startDate; if(stcPageMeta.endDate)document.getElementById('stc-endDate').value=stcPageMeta.endDate; if(stcPageMeta.location)document.getElementById('stc-location').value=stcPageMeta.location; if(stcPageMeta.courseTitle)document.getElementById('stc-courseTitle').value=stcPageMeta.courseTitle; if(stcPageMeta.agency)document.getElementById('stc-agency').value=stcPageMeta.agency; } }
+    if (!stcPageMeta) { stcPageMeta=stcScrapePageMeta(); const ov=document.getElementById('stc-overlay'); if(ov){ ['stc-startDate','stc-endDate','stc-location','stc-courseTitle','stc-agency'].forEach(id=>{const el=document.getElementById(id);if(el&&!el.value){const key=id.replace('stc-','').replace('startDate','startDate').replace('endDate','endDate').replace('courseTitle','courseTitle').replace('agency','agency');}}); if(stcPageMeta.startDate)document.getElementById('stc-startDate').value=stcPageMeta.startDate; if(stcPageMeta.endDate)document.getElementById('stc-endDate').value=stcPageMeta.endDate; if(stcPageMeta.location)document.getElementById('stc-location').value=stcPageMeta.location; if(stcPageMeta.courseTitle){const matched=stcMatchCourseTitle(stcPageMeta.courseTitle);if(matched)document.getElementById('stc-courseTitle').value=matched;} if(stcPageMeta.agency)document.getElementById('stc-agency').value=stcPageMeta.agency; } }
     document.getElementById('stc-overlay').classList.add('open');
 }
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
