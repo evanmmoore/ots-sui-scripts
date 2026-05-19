@@ -277,8 +277,13 @@ if (HOST === 'admin.otsystems.net') {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 function parseEcard(text) {
-  const n = text.replace(/ /gi, ' ').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ');
-  const m = n.match(/\be[-\s]?card[\s:]+(\d{8,20})/i);
+  // note.Body comes back as raw HTML \u2014 decode entities (incl. &nbsp;) and
+  // strip tags via the DOM before matching. Without this, "BLS ecard&nbsp;123\u2026"
+  // leaves a literal "&nbsp;" between "card" and the digits and the regex misses.
+  const div = document.createElement('div');
+  div.innerHTML = text || '';
+  const plain = div.textContent.replace(/\u00a0/g, ' ').replace(/\s+/g, ' ');
+  const m = plain.match(/\be[-\s]?card[\s:]+(\d{8,20})/i);
   return m ? m[1] : null;
 }
 function waitForEl(selector, timeout = 10000) {
