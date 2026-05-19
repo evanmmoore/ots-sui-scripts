@@ -16,6 +16,7 @@
 // @grant        GM_getValue
 // @grant        GM_deleteValue
 // @connect      generativelanguage.googleapis.com
+// @connect      otsystems.net
 // @require      https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js
 // ==/UserScript==
 
@@ -96,7 +97,12 @@ function emsGeminiPost(url, body) {
 
 /* ══════════════════════════════════════════════════════════════════════════
    WORKER A — otsystems.net: fetch eCard notes
+   Disabled: replaced by GM_xmlhttpRequest calls from runEcardScraper in the
+   main tab. Kept commented out as a safety net — restore this block AND
+   the popup-window call in runEcardScraper if session cookies turn out
+   not to be shared across otsystems.net subdomains.
 ══════════════════════════════════════════════════════════════════════════ */
+/*
 if (HOST === 'otsystems.net') {
   async function runWorker() {
     const raw = await GM_getValue('ec_job', null);
@@ -131,6 +137,7 @@ if (HOST === 'otsystems.net') {
   runWorker();
   return;
 }
+*/
 
 /* ══════════════════════════════════════════════════════════════════════════
    WORKER B — ecards.heart.org: fill & verify
@@ -283,7 +290,7 @@ function parseEcard(text) {
   const div = document.createElement('div');
   div.innerHTML = text || '';
   const plain = div.textContent.replace(/\u00a0/g, ' ').replace(/\s+/g, ' ');
-  const m = plain.match(/\be[-\s]?card[\s:]+(\d{8,20})/i);
+  const m = plain.match(/\be[-\s]?card[\s:#-]+(\d{8,20})/i);
   return m ? m[1] : null;
 }
 function waitForEl(selector, timeout = 10000) {
@@ -476,7 +483,7 @@ function buildEcardPanel(students) {
   if (!document.getElementById('ec-overlay')) {
     const overlay = document.createElement('div');
     overlay.id = 'ec-overlay';
-    overlay.innerHTML = `<div id="ec-panel"><div id="ec-header"><h5><span class="material-symbols-outlined">badge</span> eCard Numbers <span id="ec-count">—</span></h5><button id="ec-close" title="Close">✕</button></div><div id="ec-progress-wrap"><div id="ec-progress-label">Opening worker tab…</div><div id="ec-progress-track"><div id="ec-progress-fill"></div></div></div><div id="ec-body"><div id="ec-notice">ℹ️ A background window will open briefly on otsystems.net to fetch notes — it closes automatically when done. If your browser blocks it, allow popups for this site.</div><table id="ec-table"><thead><tr><th style="width:32px">#</th><th>Student</th><th style="width:160px">eCard Number</th><th style="width:90px">Status</th></tr></thead><tbody id="ec-tbody"></tbody></table></div><div id="ec-footer"><span id="ec-footer-info">—</span><div id="ec-footer-btns"><button id="ec-copy-btn" class="ec-footer-btn"><span class="material-symbols-outlined" style="font-size:10pt">content_copy</span> Copy CSV</button><button id="ec-aha-btn" class="ec-footer-btn"><span class="material-symbols-outlined" style="font-size:10pt">verified</span> Submit to AHA</button></div></div></div>`;
+    overlay.innerHTML = `<div id="ec-panel"><div id="ec-header"><h5><span class="material-symbols-outlined">badge</span> eCard Numbers <span id="ec-count">—</span></h5><button id="ec-close" title="Close">✕</button></div><div id="ec-progress-wrap"><div id="ec-progress-label">Opening worker tab…</div><div id="ec-progress-track"><div id="ec-progress-fill"></div></div></div><div id="ec-body"><div id="ec-notice">ℹ️ Fetching notes from otsystems.net in the background — a few seconds per student.</div><table id="ec-table"><thead><tr><th style="width:32px">#</th><th>Student</th><th style="width:160px">eCard Number</th><th style="width:90px">Status</th></tr></thead><tbody id="ec-tbody"></tbody></table></div><div id="ec-footer"><span id="ec-footer-info">—</span><div id="ec-footer-btns"><button id="ec-copy-btn" class="ec-footer-btn"><span class="material-symbols-outlined" style="font-size:10pt">content_copy</span> Copy CSV</button><button id="ec-aha-btn" class="ec-footer-btn"><span class="material-symbols-outlined" style="font-size:10pt">verified</span> Submit to AHA</button></div></div></div>`;
     document.body.appendChild(overlay);
     document.getElementById('ec-close').addEventListener('click', () => overlay.classList.remove('open'));
     overlay.addEventListener('click', e => { if (e.target === overlay) overlay.classList.remove('open'); });
@@ -563,39 +570,48 @@ async function runEcardScraper() {
   const students = collectStudents();
   if (!students.length) { alert('No students found. Make sure the student list has loaded.'); return; }
   buildEcardPanel(students);
-  const job = { status: 'pending', students, results: {}, progress: 0 };
-  await GM_setValue('ec_job', JSON.stringify(job));
-  const workerTab = window.open('https://otsystems.net/admin/students/dashboard/', 'ec_worker', 'width=1,height=1,top=0,left=0,toolbar=no,menubar=no,scrollbars=no,status=no,location=no');
-  if (!workerTab) { document.getElementById('ec-progress-label').textContent = '⚠️ Popup blocked — please allow popups for this site and try again.'; return; }
-  const progressFill = document.getElementById('ec-progress-fill');
+  const API = 'https://otsystems.net/admin/students/dashboard/notes/API/JSON_NotesEvents.asp';
+  const progressFill  = document.getElementById('ec-progress-fill');
   const progressLabel = document.getElementById('ec-progress-label');
   const total = students.length;
-  let lastProgress = 0;
-  const poll = setInterval(async () => {
+  const results = {};
+
+  for (let i = 0; i < students.length; i++) {
+    const s = students[i];
+    progressLabel.textContent = `Fetching ${i + 1} of ${total}: ${s.name}`;
     try {
-      const raw = await GM_getValue('ec_job', null);
-      if (!raw) return;
-      const current = JSON.parse(raw);
-      if (current.progress > lastProgress) {
-        for (let i = lastProgress; i < current.progress; i++) setRowResult(students[i].number, current.results[students[i].number]);
-        lastProgress = current.progress;
-        progressFill.style.width = `${Math.round((current.progress / total) * 100)}%`;
-        progressLabel.textContent = `Fetched ${current.progress} of ${total}: ${students[current.progress - 1]?.name || ''}`;
-      }
-      if (current.status === 'done') {
-        clearInterval(poll);
-        students.forEach(s => setRowResult(s.number, current.results[s.number]));
-        const found = Object.values(current.results).filter(Boolean).length;
-        progressFill.style.width = '100%';
-        progressLabel.textContent = `Done — ${found} of ${total} eCards found`;
-        document.getElementById('ec-footer-info').textContent = `${found} of ${total} eCards found`;
-        document.getElementById('ec-notice').style.display = 'none';
-        if (found > 0) document.getElementById('ec-aha-btn').classList.add('visible');
-        await GM_deleteValue('ec_job');
-      }
-    } catch (e) {}
-  }, 500);
-  setTimeout(() => clearInterval(poll), 180000);
+      const res = await new Promise((resolve, reject) => {
+        GM_xmlhttpRequest({
+          method: 'POST',
+          url: API,
+          headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+          data: JSON.stringify({ StudentNumber: parseInt(s.number), FormAction: 'getnotes' }),
+          timeout: 15000,
+          onload: r => resolve(r),
+          onerror: e => reject(e),
+          ontimeout: () => reject(new Error('Timeout')),
+        });
+      });
+      if (res.status < 200 || res.status >= 300) throw new Error('HTTP ' + res.status);
+      const data = JSON.parse(res.responseText);
+      const notes = (data?.returnObj?.Notes) || [];
+      const text = notes.map(n => n.Body || '').join('\n');
+      results[s.number] = parseEcard(text) || null;
+    } catch (e) {
+      console.warn('[eCard] fetch failed for', s.number, e);
+      results[s.number] = null;
+    }
+    setRowResult(s.number, results[s.number]);
+    progressFill.style.width = `${Math.round(((i + 1) / total) * 100)}%`;
+    await sleep(150);
+  }
+
+  const found = Object.values(results).filter(Boolean).length;
+  progressFill.style.width = '100%';
+  progressLabel.textContent = `Done — ${found} of ${total} eCards found`;
+  document.getElementById('ec-footer-info').textContent = `${found} of ${total} eCards found`;
+  document.getElementById('ec-notice').style.display = 'none';
+  if (found > 0) document.getElementById('ec-aha-btn').classList.add('visible');
 }
 
 function scrapeStudents() {
@@ -990,7 +1006,7 @@ const STC_OBJECTIVES_PDF_B64 = 'JVBERi0xLjMKJcTl8uXrp/Og0MTGCjMgMCBvYmoKPDwgL0Zp
 const STC_OBJECTIVES_PAGE_MAP = {
     'PSFA Optional Skill - Santa Barbara County Naloxone': 6,
     'California Title 22 Public Safety First Aid': 1,
-    'California Title 22 Public Safety First Aid with Naloxone 24': 2,
+    'California Title 22 Public Safety First Aid with Naloxone': 2,
     'California Title 22 Public Safety First Aid - Renewal': 3,
     'California Title 22 Public Safety First Aid with Naloxone - Renewal': 4,
     'American Heart Association BLS CPR with First Aid': 5,
@@ -1363,7 +1379,7 @@ function buildSTCPanel() {
                             <option value="" disabled selected>— select course —</option>
                             <option>PSFA Optional Skill - Santa Barbara County Naloxone</option>
                             <option>California Title 22 Public Safety First Aid</option>
-                            <option>California Title 22 Public Safety First Aid with Naloxone 24</option>
+                            <option>California Title 22 Public Safety First Aid with Naloxone</option>
                             <option>California Title 22 Public Safety First Aid - Renewal</option>
                             <option>American Heart Association BLS CPR with First Aid</option>
                             <option>California Title 22 Public Safety First Aid with Naloxone - Renewal</option>
