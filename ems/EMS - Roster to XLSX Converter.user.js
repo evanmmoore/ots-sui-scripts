@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         EMS - Roster to XLSX Converter
 // @namespace    https://*.otsystems.net/*
-// @version      2.5
+// @version      2.6
 // @description  Upload a roster (photo, PDF, CSV, Excel), verify fields, download formatted XLSX for ticket system import
 // @match        https://admin.otsystems.net/
 // @match        https://admin.otsystems.net/*
@@ -349,7 +349,7 @@
         link.href = '#';
         link.style.fontWeight = 'bold';
         link.textContent = 'Roster Converter';
-        link.onclick = e => { e.preventDefault(); openPanel(); };
+        link.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); openPanel(); });
 
         if (wrapInLi) {
             const li = document.createElement('li');
@@ -388,19 +388,37 @@
     function injectNavLinkSiteB() {
         if (document.querySelector('#tsi-nav-item')) return;
 
+        // Find the Ticket System link inside the External column
         const ticketLink = Array.from(document.querySelectorAll('a.mega-grandchild')).find(a =>
             (a.textContent || '').trim() === 'Ticket System'
         );
         if (!ticketLink) return;
 
-        const { node } = makeRosterLink('mega-grandchild ng-binding ng-scope md-ink-ripple', false);
-        // Insert after the sibling div that wraps Ticket System
-        const parentDiv = ticketLink.closest('div[ng-repeat]') || ticketLink.parentNode;
-        if (parentDiv && parentDiv.parentNode) {
-            parentDiv.parentNode.insertBefore(node, parentDiv.nextSibling);
-        } else {
-            ticketLink.parentNode.insertBefore(node, ticketLink.nextSibling);
-        }
+        // Build the link — insert directly after Ticket System anchor inside the same column div
+        const link = document.createElement('a');
+        link.id = 'tsi-link';
+        link.className = 'mega-grandchild';
+        link.href = '#';
+        link.style.fontWeight = 'bold';
+        link.style.display = 'block';
+        link.textContent = 'Roster Converter';
+        link.addEventListener('click', e => {
+            e.preventDefault();
+            e.stopPropagation();
+            // Close the dropdown before opening panel
+            document.body.click();
+            setTimeout(() => openPanel(), 50);
+        });
+
+        const wrapper = document.createElement('div');
+        wrapper.id = 'tsi-nav-item';
+
+        wrapper.appendChild(link);
+
+        // Insert the wrapper right after the Ticket System anchor inside its parent column
+        const col = ticketLink.closest('div.col-sm-6, div.col-md-4, div.col-xl-3') || ticketLink.parentNode;
+        col.appendChild(wrapper);
+
         console.log('[TSI] Injected (Site B / mega-grandchild)');
     }
 
