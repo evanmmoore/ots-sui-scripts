@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         EMS - Tools Launcher
 // @namespace    http://tampermonkey.net/
-// @version      3.6
+// @version      3.7
 // @description  Unified EMS tools launcher — Class Reminder Emails + eCard Scraper + STC Roster
 // @author       Claude
 // @match        https://admin2025.otsystems.net/training/classroom/session/*/students*
@@ -2288,14 +2288,27 @@ async function grBuildPdf(ci, students) {
                 txt(page, s.name || '', COLS[1] + 3, rowTopY + 3, {size:10, maxWidth: maxNameW});
                 const maxEmailW = COL_W[3] - 6;
                 txt(page, s.email || '', COLS[3] + 3, rowTopY + 3, {size:10, maxWidth: maxEmailW});
+
+                // Student address (split at first comma → street / city, state zip)
+                if (ci.studentAddress) {
+                    const addr = ci.studentAddress;
+                    const ci_  = addr.indexOf(',');
+                    const line1 = ci_ === -1 ? addr           : addr.slice(0, ci_).trim();
+                    const line2 = ci_ === -1 ? ''             : addr.slice(ci_ + 1).trim();
+                    const maxAddrW = COL_W[2] - 6;
+                    txtFit(page, line1, COLS[2] + 3, rowTopY + 3,  maxAddrW, {maxSize:10, minSize:7});
+                    if (line2) txtFit(page, line2, COLS[2] + 3, rowTopY + 16, maxAddrW, {maxSize:10, minSize:7});
+                }
             }
         }
     }
 
     // ── draw footer ──────────────────────────────────────────────────────────
     function drawFooter(page, pgNum, pgTotal) {
-        // "Visit us on the web at –" at x=144, y_top=519.9 (page 1) / y_top=546.6 (page 2+)
-        const fy = page === pages[0] ? 519.9 : 546.6;
+        // "Visit us on the web at –" at x=144. ~25-unit gap above footer on both
+        // page 1 (table ends at 494.9 → footer 519.9) and page 2+ (table ends at
+        // 546.6 → footer 571.6) so the footer doesn't hug the last student row.
+        const fy = page === pages[0] ? 519.9 : 571.6;
         txt(page, 'Visit us on the web at \u2013 ', 144, fy, {size:12});
         // URL in blue
         txt(page, 'www.SafetyUnlimited.com', 260.3, fy, {size:12, color:rgb(0.019,0.388,0.757)});
@@ -2581,6 +2594,10 @@ function openGeneralRoster() {
             <input id="gr-hours" placeholder="e.g. 8 Hours">
           </div>
         </div>
+        <div class="gr-f">
+          <label>Student Address <span class="gr-auto">AUTO</span></label>
+          <input id="gr-studentAddress" placeholder="e.g. 2139 Tapo St #111, Simi Valley, CA 93063">
+        </div>
       </div>
       <div class="gr-acts">
         <button class="gr-btn gr-btn-sec" id="gr-back2">&larr; Back</button>
@@ -2668,13 +2685,14 @@ function openGeneralRoster() {
         { name:'Amy Johnson',   email:'ajohnson@example.com' },
     ];
     const GR_TOUR_DUMMY_META = {
-        courseTitle: 'California Title 22 First Aid',
-        instructor:  'Zianya Fernandez',
-        startDate:   '5/14/2026',
-        endDate:     '5/16/2026',
-        location:    '2139 Tapo St #111, Simi Valley, CA 93063',
-        customer:    'City of Simi Valley',
-        hours:       '8 Hours'
+        courseTitle:    'California Title 22 First Aid',
+        instructor:     'Zianya Fernandez',
+        startDate:      '5/14/2026',
+        endDate:        '5/16/2026',
+        location:       '2139 Tapo St #111, Simi Valley, CA 93063',
+        studentAddress: '2139 Tapo St #111, Simi Valley, CA 93063',
+        customer:       'City of Simi Valley',
+        hours:          '8 Hours'
     };
     let grTourPrevStudents = null;
     let grTourPrevMeta     = null;
@@ -2712,13 +2730,14 @@ function openGeneralRoster() {
             grSetStep(2);
             // Fill class info fields with dummy data
             var dFields = {
-                'gr-courseTitle': GR_TOUR_DUMMY_META.courseTitle,
-                'gr-instructor':  GR_TOUR_DUMMY_META.instructor,
-                'gr-date':        GR_TOUR_DUMMY_META.startDate,
-                'gr-endDate':     GR_TOUR_DUMMY_META.endDate,
-                'gr-location':    GR_TOUR_DUMMY_META.location,
-                'gr-customer':    GR_TOUR_DUMMY_META.customer,
-                'gr-hours':       GR_TOUR_DUMMY_META.hours
+                'gr-courseTitle':    GR_TOUR_DUMMY_META.courseTitle,
+                'gr-instructor':     GR_TOUR_DUMMY_META.instructor,
+                'gr-date':           GR_TOUR_DUMMY_META.startDate,
+                'gr-endDate':        GR_TOUR_DUMMY_META.endDate,
+                'gr-location':       GR_TOUR_DUMMY_META.location,
+                'gr-studentAddress': GR_TOUR_DUMMY_META.studentAddress,
+                'gr-customer':       GR_TOUR_DUMMY_META.customer,
+                'gr-hours':          GR_TOUR_DUMMY_META.hours
             };
             for (var dKey in dFields) {
                 var dEl = document.getElementById(dKey);
@@ -2755,13 +2774,13 @@ function openGeneralRoster() {
         grRenderStudentTable();
         // Clear dummy meta values so real ones show next time
         var dMeta = GR_TOUR_DUMMY_META;
-        ['gr-courseTitle','gr-instructor','gr-date','gr-endDate','gr-location','gr-customer','gr-hours'].forEach(function(id) {
+        ['gr-courseTitle','gr-instructor','gr-date','gr-endDate','gr-location','gr-studentAddress','gr-customer','gr-hours'].forEach(function(id) {
             var el = document.getElementById(id);
             if (!el) return;
-            if (el.value === dMeta.courseTitle || el.value === dMeta.instructor ||
-                el.value === dMeta.startDate   || el.value === dMeta.endDate    ||
-                el.value === dMeta.location    || el.value === dMeta.customer   ||
-                el.value === dMeta.hours) {
+            if (el.value === dMeta.courseTitle    || el.value === dMeta.instructor ||
+                el.value === dMeta.startDate      || el.value === dMeta.endDate    ||
+                el.value === dMeta.location       || el.value === dMeta.studentAddress ||
+                el.value === dMeta.customer       || el.value === dMeta.hours) {
                 el.value = '';
             }
         });
@@ -2828,11 +2847,18 @@ function openGeneralRoster() {
         grMeta = grScrapePageMeta();
         document.getElementById('gr-courseTitle').value = grMeta.courseTitle || '';
         // Instructor is typed in manually — do not auto-populate.
-        document.getElementById('gr-customer').value    = grMeta.customer    || '';
-        document.getElementById('gr-location').value    = grMeta.location    || '';
-        document.getElementById('gr-date').value        = grMeta.startDate   || '';
-        document.getElementById('gr-endDate').value     = grMeta.endDate     || '';
+        document.getElementById('gr-customer').value         = grMeta.customer    || '';
+        document.getElementById('gr-location').value         = grMeta.location    || '';
+        document.getElementById('gr-studentAddress').value   = grMeta.location    || '';
+        document.getElementById('gr-date').value             = grMeta.startDate   || '';
+        document.getElementById('gr-endDate').value          = grMeta.endDate     || '';
     }
+
+    // Mirror Location → Student Address on every Location edit. Manual edits to
+    // Student Address are preserved until the next Location change.
+    document.getElementById('gr-location').addEventListener('input', e => {
+        document.getElementById('gr-studentAddress').value = e.target.value;
+    });
 
     // ── Student source buttons ────────────────────────────────────────────────
     document.getElementById('gr-src-page').addEventListener('click', () => {
@@ -2896,13 +2922,14 @@ function openGeneralRoster() {
         btn.disabled = true; btn.textContent = '\u23F3 Generating\u2026';
         try {
             grLastCi = {
-                courseTitle: document.getElementById('gr-courseTitle').value.trim() || 'Class',
-                instructor:  document.getElementById('gr-instructor').value.trim()  || '',
-                customer:    document.getElementById('gr-customer').value.trim()    || '',
-                location:    document.getElementById('gr-location').value.trim()    || '',
-                hours:       document.getElementById('gr-hours').value.trim()       || '',
-                startDate:   document.getElementById('gr-date').value.trim()        || '',
-                endDate:     document.getElementById('gr-endDate').value.trim()     || '',
+                courseTitle:    document.getElementById('gr-courseTitle').value.trim()    || 'Class',
+                instructor:     document.getElementById('gr-instructor').value.trim()     || '',
+                customer:       document.getElementById('gr-customer').value.trim()       || '',
+                location:       document.getElementById('gr-location').value.trim()       || '',
+                studentAddress: document.getElementById('gr-studentAddress').value.trim() || '',
+                hours:          document.getElementById('gr-hours').value.trim()          || '',
+                startDate:      document.getElementById('gr-date').value.trim()           || '',
+                endDate:        document.getElementById('gr-endDate').value.trim()        || '',
             };
             const dates = grEnumerateDates(grLastCi.startDate, grLastCi.endDate);
             const safe  = (grLastCi.courseTitle||'Roster').replace(/[^a-zA-Z0-9]/g,'_').slice(0,30);
@@ -2958,9 +2985,10 @@ function openGeneralRoster() {
         document.getElementById('gr-sub-paste').style.display   = 'none';
         document.getElementById('gr-paste-area').value = '';
         document.getElementById('gr-upload-status').textContent = '';
-        document.getElementById('gr-customer').value = '';
-        document.getElementById('gr-endDate').value  = '';
-        document.getElementById('gr-hours').value    = '';
+        document.getElementById('gr-customer').value       = '';
+        document.getElementById('gr-endDate').value        = '';
+        document.getElementById('gr-hours').value          = '';
+        document.getElementById('gr-studentAddress').value = '';
         grPopulateAutoFields();
         grSetStep(1);
     });
