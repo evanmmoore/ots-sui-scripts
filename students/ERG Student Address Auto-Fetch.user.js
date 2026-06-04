@@ -1,11 +1,11 @@
 // ==UserScript==
-// @name         ERG Student Address Auto-Fetch 9/11/25
+// @name         ERG Student Address Auto-Fetch
 // @namespace    https://otsystems.net/
-// @version      3.10
-// @description  Fetch student names, organization (3rd column), and addresses in the Queue tab; display instantly in a new column with copy button; wrap long product names; remove middle initials; exclude meaningless orgs; addresses load asynchronously.
+// @version      3.12
+// @description  Fetch student names, organization (3rd column), and addresses in the Queue tab; display instantly in a new column with copy button; wrap long product names; remove middle initials; exclude meaningless orgs; addresses load asynchronously via hidden iframe so Angular renders them.
 // @match        https://otsystems.net/admin/utilities/ERG/*
-// @grant        GM_xmlhttpRequest
-// @connect      https://admin.otsystems.net/#/
+// @grant        none
+// @connect      otsystems.net
 // ==/UserScript==
 
 (function() {
@@ -42,6 +42,73 @@
         if(!stateText) return "";
         const key = stateText.trim().toLowerCase();
         return stateMap[key] || stateText.trim().toUpperCase();
+    }
+
+    // --- Robust label-based field lookup within a rendered document ---
+    function getFieldByLabel(doc, labelText){
+        const ths = doc.querySelectorAll('table.student-details-table th, #student_data_div th');
+        const want = labelText.toLowerCase();
+        for(const th of ths){
+            if(th.textContent.trim().toLowerCase().startsWith(want)){
+                const td = th.nextElementSibling;
+                if(td){
+                    const span = td.querySelector('span.ng-binding') || td.querySelector('span') || td;
+                    const val = (span.textContent || '').trim();
+                    return (val === '--') ? '' : val;
+                }
+            }
+        }
+        return '';
+    }
+
+    // --- Load a student dashboard in a hidden iframe and read the rendered address ---
+    function fetchAddressViaIframe(url){
+        return new Promise(resolve=>{
+            const iframe = document.createElement('iframe');
+            iframe.style.position = 'absolute';
+            iframe.style.width = '1024px';
+            iframe.style.height = '768px';
+            iframe.style.left = '-10000px';
+            iframe.style.top = '0';
+            iframe.style.opacity = '0';
+            iframe.style.pointerEvents = 'none';
+
+            let done = false;
+            let attempts = 0;
+            const maxAttempts = 60; // ~30s at 500ms
+
+            function finish(result){
+                if(done) return;
+                done = true;
+                clearInterval(poll);
+                try{ iframe.remove(); }catch(e){}
+                resolve(result);
+            }
+
+            const poll = setInterval(()=>{
+                attempts++;
+                let idoc;
+                try{ idoc = iframe.contentDocument || iframe.contentWindow.document; }
+                catch(e){ return finish(null); } // cross-origin; bail
+
+                if(idoc){
+                    const street = getFieldByLabel(idoc, 'Street Address');
+                    const city   = getFieldByLabel(idoc, 'City');
+                    const state  = getFieldByLabel(idoc, 'State');
+                    const zip    = getFieldByLabel(idoc, 'Zip');
+                    // Consider it loaded once any of the core fields render
+                    if(street || city || state || zip){
+                        const apt = getFieldByLabel(idoc, 'Apt/Suite');
+                        return finish({ street, apt, city, state, zip });
+                    }
+                }
+
+                if(attempts >= maxAttempts) finish(null);
+            }, 500);
+
+            iframe.src = url;
+            document.body.appendChild(iframe);
+        });
     }
 
     function addMailingAddressHeader(table){
@@ -90,7 +157,7 @@
         addressCell.innerHTML=`
             <div style="display:flex; flex-direction:column; align-items:flex-start; font-size:14px; line-height:1.3; font-family:Roboto,sans-serif;">
                 <pre style="margin:0; text-align:left; background:none; border:none; padding:0; font-family:inherit;">${studentName}${orgName?'\n'+orgName:''}</pre>
-                <pre class="address-lines" style="margin:0; text-align:left; background:none; border:none; padding:0; font-family:inherit;"></pre>
+                <pre class="address-lines" style="margin:0; text-align:left; background:none; border:none; padding:0; font-family:inherit; color:#888;">Loading…</pre>
                 <button class="copy-btn" style="margin-top:5px; font-size:11px; cursor:pointer;">Copy</button>
             </div>`;
 
@@ -103,40 +170,47 @@
             });
         });
 
-        // --- Fetch mailing address from student dashboard asynchronously ---
+        // --- Fetch mailing address via hidden iframe (Angular renders the values) ---
         const studentURL = nameLink ? nameLink.href : null;
+        const addressLines = addressCell.querySelector('.address-lines');
         if(studentURL){
-            await new Promise(resolve=>{
-                GM_xmlhttpRequest({
-                    method:'GET',
-                    url:studentURL,
-                    onload:function(response){
-                        const parser=new DOMParser();
-                        const doc = parser.parseFromString(response.responseText,'text/html');
+            const data = await fetchAddressViaIframe(studentURL);
+            if(data){
+                let addressLine1 = data.street ? capitalizeWords(data.street) : '';
+                if(data.apt) addressLine1 += (addressLine1 ? ' ' : '') + capitalizeWords(data.apt);
 
-                        const streetEl = doc.querySelector('#student_data_div > div > div:nth-child(2) > div:nth-child(1) > div > table > tbody > tr:nth-child(4) > td');
-                        const aptEl = doc.querySelector('#student_data_div > div > div:nth-child(2) > div:nth-child(1) > div > table > tbody > tr:nth-child(5) > td');
-                        const cityEl = doc.querySelector('#student_data_div > div > div:nth-child(2) > div:nth-child(1) > div > table > tbody > tr:nth-child(6) > td');
-                        const stateEl = doc.querySelector('#student_data_div > div > div:nth-child(2) > div:nth-child(1) > div > table > tbody > tr:nth-child(7) > td');
-                        const zipEl = doc.querySelector('#student_data_div > div > div:nth-child(2) > div:nth-child(1) > div > table > tbody > tr:nth-child(8) > td');
+                let addressLine2 = '';
+                if(data.city)  addressLine2 += capitalizeWords(data.city);
+                if(data.state) addressLine2 += (addressLine2 ? ', ' : '') + normalizeState(data.state);
+                if(data.zip)   addressLine2 += ' ' + data.zip;
 
-                        let addressLine1 = streetEl ? capitalizeWords(streetEl.textContent.trim()) : '';
-                        if(aptEl && aptEl.textContent.trim()) addressLine1 += ' ' + capitalizeWords(aptEl.textContent.trim());
+                if(addressLines){
+                    addressLines.style.color = '';
+                    addressLines.textContent = `${addressLine1}\n${addressLine2}`;
+                }
+            } else {
+                if(addressLines){
+                    addressLines.style.color = '#c00';
+                    addressLines.textContent = 'Address unavailable';
+                }
+            }
+        }
+    }
 
-                        let addressLine2 = '';
-                        if(cityEl) addressLine2 += capitalizeWords(cityEl.textContent.trim());
-                        if(stateEl) addressLine2 += (addressLine2? ', ' : '') + normalizeState(stateEl.textContent.trim());
-                        if(zipEl) addressLine2 += ' ' + zipEl.textContent.trim();
+    // Limit concurrent iframe loads so we don't open dozens at once
+    let queue = [];
+    let active = 0;
+    const MAX_CONCURRENT = 3;
 
-                        // Update the placeholder with actual address
-                        const addressLines = addressCell.querySelector('.address-lines');
-                        if(addressLines) addressLines.textContent = `${addressLine1}\n${addressLine2}`;
-
-                        resolve();
-                    },
-                    onerror:function(){resolve();}
-                });
-            });
+    function enqueue(row){
+        queue.push(row);
+        pump();
+    }
+    function pump(){
+        while(active < MAX_CONCURRENT && queue.length){
+            const row = queue.shift();
+            active++;
+            fetchStudentAddress(row).finally(()=>{ active--; pump(); });
         }
     }
 
@@ -151,7 +225,10 @@
 
         const rows=table.querySelectorAll('tbody tr');
         rows.forEach(row=>{
-            if(!row.querySelector('.mailing-address-cell')) fetchStudentAddress(row);
+            if(!row.querySelector('.mailing-address-cell')){
+                row.dataset.addrQueued = '1';
+                enqueue(row);
+            }
         });
 
         // Wrap product column content after dash
