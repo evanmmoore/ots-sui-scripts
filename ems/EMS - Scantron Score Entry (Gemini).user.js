@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         EMS - Scantron Score Entry (Gemini)
 // @namespace    https://admin2025.otsystems.net/
-// @version      9.0
-// @description  Upload scantron photos or PDFs; Gemini 2.5 Flash reads each student name + earned-points score (handwritten overrides printed). Review every row, then enter scores into the current quiz page. Review is mandatory — nothing saves until you confirm.
+// @version      9.1
+// @description  Upload scantron photos or PDFs; Gemini 2.5 Flash reads each student name + earned-points score (handwritten overrides printed). Review every row, then enter scores into the current quiz page. The grade date is set from the assignment's due date (never today's date) and shown in an editable box. Review is mandatory — nothing saves until you confirm.
 // @author       You
 // @match        https://admin2025.otsystems.net/training/classroom/session/*/grades/*
 // @match        https://admin2025.otsystems.net/training/classroom/session/*
@@ -75,7 +75,47 @@
     if (/\bfinal\b/.test(t))        { type = 'final'; max = 150; pages = 2; }
     else if (/\bblock\b/.test(t))   { type = 'block'; max = 100; pages = 2; }
     else if (/\bquiz\b/.test(t))    { type = 'quiz';  max = 10;  pages = 1; }
-    return { title: title, type: type, max: max, pages: pages };
+    var due = detectDueDate();
+    return { title: title, type: type, max: max, pages: pages, dueDate: due.text, dueISO: due.iso };
+  }
+
+  // Read the assignment's preset due date from the page (e.g. "Due: Jun 4, 2026").
+  // Returns { text: "Jun 4, 2026", iso: "2026-06-04" }. The script uses this so the
+  // grade date matches the assignment — it never writes the current date.
+  function detectDueDate() {
+    var scopes = [
+      document.querySelector('.assignment-item-vertical.selected .assignment-details'),
+      document.querySelector('app-assignment-detail .assignment-details'),
+      document.querySelector('app-assignment-detail')
+    ];
+    for (var i = 0; i < scopes.length; i++) {
+      var el = scopes[i];
+      if (!el) continue;
+      var txt = (el.textContent || '').replace(/\s+/g, ' ');
+      var m = txt.match(/Due:\s*([A-Za-z]{3,}\.?\s+\d{1,2},?\s+\d{4}|\d{1,2}\/\d{1,2}\/\d{2,4})/i);
+      if (m) return { text: m[1].trim(), iso: parseDateToISO(m[1].trim()) };
+    }
+    return { text: '', iso: '' };
+  }
+
+  var MONTHS = { jan: '01', feb: '02', mar: '03', apr: '04', may: '05', jun: '06',
+                 jul: '07', aug: '08', sep: '09', oct: '10', nov: '11', dec: '12' };
+  // Convert "Jun 4, 2026" or "6/4/2026" to "2026-06-04" for a date input. '' if unparseable.
+  function parseDateToISO(s) {
+    if (!s) return '';
+    s = String(s).trim();
+    var m = s.match(/^([A-Za-z]{3,})\.?\s+(\d{1,2}),?\s+(\d{4})$/);
+    if (m) {
+      var mo = MONTHS[m[1].slice(0, 3).toLowerCase()];
+      if (!mo) return '';
+      return m[3] + '-' + mo + '-' + ('0' + m[2]).slice(-2);
+    }
+    m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+    if (m) {
+      var yr = m[3].length === 2 ? '20' + m[3] : m[3];
+      return yr + '-' + ('0' + m[1]).slice(-2) + '-' + ('0' + m[2]).slice(-2);
+    }
+    return '';
   }
 
   // Convert a roster name that may be "Last, First" into "First Last" for matching.
@@ -111,6 +151,7 @@
       var displayName = extractRosterName(row);
       if (!displayName) return;
       var input = row.querySelector('input[type="number"]');
+      var dateInput = row.querySelector('input[type="date"]');
       var saveBtn = row.querySelector('button.btn-primary');
       var editBtn = null, graded = false;
       row.querySelectorAll('button').forEach(function (b) {
@@ -123,6 +164,7 @@
         matchName: flipName(displayName),  // "Carson Bates" for matching
         rowEl: row,
         inputEl: input,                    // may be null on graded rows
+        dateEl: dateInput,                 // per-row grade date field (may be null)
         saveBtn: saveBtn,                  // may be null on graded rows
         editBtn: editBtn,
         graded: graded
@@ -180,6 +222,10 @@
     '#sse-review{display:none;margin-top:14px;}' +
     '#sse-review.active{display:block;}' +
     '#sse-confirm-banner{background:#fef3c7;border:1px solid #fcd34d;border-radius:8px;padding:9px 11px;font-size:11px;color:' + AMBER + ';line-height:1.5;margin-bottom:10px;}' +
+    '#sse-date-box{display:flex;align-items:flex-start;gap:8px;background:#eef4fa;border:1px solid #cbd5e1;border-radius:8px;padding:9px 11px;font-size:12px;color:' + NAVY + ';line-height:1.5;margin-bottom:10px;}' +
+    '#sse-date-box .sse-date-icon{font-size:15px;flex-shrink:0;margin-top:2px;}' +
+    '#sse-date-box .sse-date-note{color:#64748b;font-size:11px;}' +
+    '#sse-date-input{padding:6px 8px;}' +
     '#sse-review-head{display:flex;align-items:center;justify-content:space-between;border-top:1px solid #e2e8f0;border-bottom:1px solid #e2e8f0;padding:7px 0;margin-bottom:6px;}' +
     '#sse-review-head .sse-label{margin:0;}' +
     '#sse-review-count{font-size:11px;color:#64748b;}' +
@@ -262,6 +308,17 @@
 
         '<div id="sse-review">' +
           '<div id="sse-confirm-banner">\u26a0 Review every name and score below. Gemini can misread \u2014 nothing is entered until you confirm. Fix anything wrong, then enter scores.</div>' +
+          '<div id="sse-date-box">' +
+            '<span class="sse-date-icon">\ud83d\udcc5</span>' +
+            '<div style="flex:1;">' +
+              '<label class="sse-label" style="margin-bottom:3px;">Grade date entered for every score</label>' +
+              '<div style="display:flex;align-items:center;gap:8px;">' +
+                '<input type="date" id="sse-date-input" class="sse-input" style="width:170px;">' +
+                '<span id="sse-date-src" class="sse-date-note"></span>' +
+              '</div>' +
+              '<div class="sse-date-note" style="margin-top:4px;">Pulled from the assignment\u2019s due date \u2014 never today\u2019s date. Change it here if you need a different date.</div>' +
+            '</div>' +
+          '</div>' +
           '<div id="sse-review-head">' +
             '<span class="sse-label">Extracted \u2014 verify each row</span>' +
             '<span id="sse-review-count"></span>' +
@@ -521,8 +578,26 @@
 
   // ── Review ────────────────────────────────────────────────────────────────────────
   var currentAsg = { type: 'unknown', max: null, pages: 1 };
+
+  // Pre-fill the editable date box with the assignment's due date (never today's date).
+  // Only fills when empty so a manual edit isn't clobbered on re-render.
+  function populateDateBox() {
+    var di = $('sse-date-input');
+    var src = $('sse-date-src');
+    if (!di) return;
+    if (!di.value && currentAsg.dueISO) di.value = currentAsg.dueISO;
+    if (src) {
+      if (currentAsg.dueDate) {
+        src.textContent = 'from assignment due date · ' + currentAsg.dueDate;
+      } else {
+        src.textContent = 'no due date found on page — set one above';
+      }
+    }
+  }
+
   function buildReview(extracted, asg) {
     if (asg) currentAsg = asg;
+    populateDateBox();
     var max = currentAsg.max;
     var roster = getRosterRows();
     results = extracted.map(function (rec) {
@@ -549,6 +624,7 @@
         extractedName: name, score: score, unsure: unsure, over: over,
         rosterName: match ? match.name : '',
         inputEl: match ? match.inputEl : null,
+        dateEl: match ? match.dateEl : null,
         saveBtn: match ? match.saveBtn : null,
         editBtn: match ? match.editBtn : null,
         graded: match ? match.graded : false,
@@ -562,6 +638,7 @@
     var review = $('sse-review');
     var list = $('sse-review-list');
     review.classList.add('active');
+    populateDateBox();
     list.innerHTML = '';
     var roster = getRosterRows();
     var rosterNames = roster.map(function (r) { return r.name; });
@@ -602,10 +679,12 @@
           var picked = sel.value;
           if (!picked) {
             results[i].rosterName = ''; results[i].inputEl = null; results[i].saveBtn = null;
+            results[i].dateEl = null;
             results[i].editBtn = null; results[i].graded = false; results[i].status = 'nomatch';
           } else {
             var rr = roster.filter(function (x) { return x.name === picked; })[0];
             results[i].rosterName = picked; results[i].inputEl = rr.inputEl; results[i].saveBtn = rr.saveBtn;
+            results[i].dateEl = rr.dateEl;
             results[i].editBtn = rr.editBtn; results[i].graded = rr.graded;
             results[i].status = 'exact'; results[i].matchScore = 1;
           }
@@ -665,11 +744,20 @@
       return !r.skipped && !r.done && r.score !== '' && (r.inputEl || r.graded);
     });
     if (toApply.length === 0) return;
-    if (!confirm('Enter ' + toApply.length + ' score(s) into the gradebook now?\n\nMake sure you have reviewed every name and score.')) return;
+
+    var dateInputEl = $('sse-date-input');
+    var gradeDate = (dateInputEl && dateInputEl.value) || '';  // ISO yyyy-mm-dd
+    var hasDateFields = toApply.some(function (r) { return !!r.dateEl; });
+    if (!gradeDate && hasDateFields) {
+      if (!confirm('No grade date is set, so the system may fall back to today\u2019s date.\n\nLeave it blank and continue anyway?')) return;
+    }
+
+    var dateMsg = gradeDate ? ' on ' + gradeDate : '';
+    if (!confirm('Enter ' + toApply.length + ' score(s)' + dateMsg + ' into the gradebook now?\n\nMake sure you have reviewed every name, score, and the date.')) return;
 
     var logEl = $('sse-log');
     logEl.classList.add('active');
-    addLog(logEl, '\u2500\u2500\u2500 Entering scores \u2500\u2500\u2500', 'info');
+    addLog(logEl, '\u2500\u2500\u2500 Entering scores' + (gradeDate ? ' \u00b7 date ' + gradeDate : '') + ' \u2500\u2500\u2500', 'info');
 
     var saved = 0;
     for (var i = 0; i < toApply.length; i++) {
@@ -684,6 +772,7 @@
             var rr = r.rowEl || (r.editBtn.closest && r.editBtn.closest('tr'));
             if (rr) {
               r.inputEl = rr.querySelector('input[type="number"]');
+              r.dateEl = rr.querySelector('input[type="date"]');
               r.saveBtn = rr.querySelector('button.btn-primary');
             }
           }
@@ -693,6 +782,12 @@
           continue;
         }
         var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        // Set the grade date (the assignment's due date) so it isn't left blank / defaulted to today.
+        if (gradeDate && r.dateEl) {
+          setter.call(r.dateEl, gradeDate);
+          r.dateEl.dispatchEvent(new Event('input', { bubbles: true }));
+          r.dateEl.dispatchEvent(new Event('change', { bubbles: true }));
+        }
         setter.call(r.inputEl, r.score);
         r.inputEl.dispatchEvent(new Event('input', { bubbles: true }));
         r.inputEl.dispatchEvent(new Event('change', { bubbles: true }));
@@ -700,7 +795,7 @@
         await sleep(150);
         if (r.saveBtn && !r.saveBtn.disabled) {
           r.saveBtn.click(); r.done = true; saved++;
-          addLog(logEl, '\u2713 ' + r.rosterName + ' \u2192 ' + r.score, 'ok');
+          addLog(logEl, '\u2713 ' + r.rosterName + ' \u2192 ' + r.score + (gradeDate ? ' (' + gradeDate + ')' : ''), 'ok');
         } else {
           await sleep(350);
           if (r.saveBtn && !r.saveBtn.disabled) {
@@ -737,6 +832,7 @@
     if (review) review.classList.remove('active');
     var list = $('sse-review-list'); if (list) list.innerHTML = '';
     var count = $('sse-review-count'); if (count) count.textContent = '';
+    var di = $('sse-date-input'); if (di) di.value = '';  // re-pull due date on next read
     var log = $('sse-log'); if (log) { log.innerHTML = ''; log.classList.remove('active'); }
     var prog = $('sse-progress'); if (prog) prog.classList.remove('active');
     var fill = $('sse-prog-fill'); if (fill) fill.style.width = '0%';
