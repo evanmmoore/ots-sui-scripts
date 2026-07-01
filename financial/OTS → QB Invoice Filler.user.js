@@ -1,10 +1,12 @@
 // ==UserScript==
-// @name         Daily Sales OTS → QB Invoice Filler
+// @name         OTS → QB Invoice Filler
 // @namespace    https://otsystems.net/
-// @version      1.4.1
-// @description  Captures the Daily Transactions report (SUI/Affiliate tabs) and auto-fills QuickBooks Online invoice lines with the correct SKU variant, qty, and rate.
+// @version      1.6.0
+// @description  Captures the Daily Transactions report (SUI/Affiliate tabs) AND the Corporate Invoice page (incl. Billing ID → Invoice no.), verifies the QBO customer matches, then auto-fills QuickBooks Online invoice lines with the correct SKU variant, qty, rate, and description.
 // @match        https://otsystems.net/admin/reports/dailytransactions/*
 // @match        https://otsystems.net/admin/reports/dailyTransactions/
+// @match        https://otsystems.net/admin/reports/corporateinvoice/generate.asp*
+// @match        https://otsystems.net/admin/reports/CorporateInvoice/generate.asp*
 // @match        https://*.qbo.intuit.com/app/invoice*
 // @match        https://qbo.intuit.com/app/invoice*
 // @match        https://qbo.intuit.com/app/invoice?nameId=*
@@ -33,6 +35,11 @@
   // Fallback if the active tab isn't in the map above:
   const DEFAULT_SUFFIX = { corporate: '-SUIC', nonCorporate: '-SUI' };
 
+  // Corporate Invoice page (generate.asp): every line is a corporate SUI item,
+  // so its SKU is always the item number + this fixed suffix. Change here if
+  // that ever varies.
+  const CORP_INVOICE_SUFFIX = '-SUIC';
+
   // Per-SKU overrides for items whose QBO SKU doesn't follow the standard
   // suffix pattern. Key = SKU the capture generates, value = actual QBO SKU.
   // Example: '0152-0894-SUI': '0152-0894-SUI-CR',
@@ -48,6 +55,15 @@
     // Qty / Rate guesses — several fallbacks tried in order:
     qtyInput     : ['input[aria-label^="Quantity line"]', 'input[aria-label^="Qty line"]', 'input[data-testid*="quantity" i]'],
     rateInput    : ['input[aria-label^="Rate line"]', 'input[aria-label^="Price line"]', 'input[data-testid*="rate" i]'],
+    // Multi-line description cell. aria-label carries the same "line N" number
+    // as the Product/Service field, so findRowFieldForLine can pair them.
+    descInput    : ['textarea[aria-label^="Description line"]', 'textarea[data-testid="Description_field"]'],
+    // Invoice no. header field — receives the OTS Billing ID.
+    invoiceNoInput : ['input[data-automation-id="reference_number"]', '#sales-forms-ui\\/reference_number', 'input[aria-label="Invoice number"]'],
+    // Customer name + Bill-to address — used only to VERIFY we're on the right
+    // customer's invoice (never written to).
+    customerInput  : ['input[aria-label="Customer"]', 'input[placeholder="Add customer"]'],
+    billToInput    : ['textarea[aria-label="billToTextAreaLabel"]', 'textarea[aria-label*="billTo" i]'],
     addLinesBtn  : ['button[data-testid*="add-lines" i]', 'button'],
     typeDelay    : 40,    // ms between simulated input steps
     menuTimeout  : 5000,  // ms to wait for the typeahead dropdown
@@ -613,6 +629,259 @@
   }
 
   /* ════════════════════════════════════════════════════════════════════
+   *  PAGE A2 — otsystems.net Corporate Invoice  (generate.asp)
+   *
+   *  Different table from Daily Transactions: rows are grouped PER COURSE
+   *  (Angular ic.ClassData), each already carrying QTY / RATE / AMOUNT plus a
+   *  student roster. One course row → one QBO invoice line. SKU is the item
+   *  number + fixed corporate suffix. Description is built to match the
+   *  desired QBO layout: course name, then "STUDENT ID (SIGNUP DATE)", then
+   *  one "Name (date)" per enrolled student.
+   * ════════════════════════════════════════════════════════════════════ */
+
+  // Pull org id + date range straight out of the generate.asp URL, so the
+  // panel can show which customer/invoice is loaded (one page = one customer).
+  function corpInvoiceMeta() {
+    const p = new URLSearchParams(location.search);
+    return {
+      orgId: p.get('org_id') || p.get('Org_ID') || '',
+      startDate: p.get('startdate') || p.get('startDate') || '',
+      endDate: p.get('enddate') || p.get('endDate') || '',
+    };
+  }
+
+  // The company name is rendered in the invoice header (a bare <div>, e.g.
+  // "A&M Engineering and Environmental Services, Inc."). No stable class, so
+  // try labeled selectors first, then fall back to scanning header divs for
+  // text that looks like a company name.
+  function corpCompanyName() {
+    const clean = (t) => (t || '').replace(/\s+/g, ' ').trim();
+
+    // 1) Explicit selectors if the page ever labels it.
+    for (const s of ['.invoice-company', '.company-name', '.org-name']) {
+      const t = clean(document.querySelector(s)?.textContent);
+      if (t.length > 2 && t.length < 160) return t;
+    }
+
+    // 2) A <th>COMPANY</th><td>…</td> row, mirroring Billing ID.
+    for (const th of document.querySelectorAll('th')) {
+      if (/^\s*(company|organization|bill\s*to)\s*$/i.test(th.textContent || '')) {
+        const t = clean(th.nextElementSibling?.textContent);
+        if (t.length > 2 && t.length < 160) return t;
+      }
+    }
+
+    // 3) Scan divs for company-looking text (entity suffix or common words).
+    const looksLikeCompany = (t) =>
+      t.length > 4 && t.length < 160 &&
+      /\b(inc\.?|llc|l\.l\.c\.|corp\.?|co\.?|ltd\.?|company|services|engineering|environmental|group|associates|solutions|systems|construction|industries)\b/i.test(t);
+    for (const div of document.querySelectorAll('div')) {
+      // Only leaf-ish divs (avoid grabbing a big container's concatenated text)
+      if (div.children.length === 0) {
+        const t = clean(div.textContent);
+        if (looksLikeCompany(t)) return t;
+      }
+    }
+    return '';
+  }
+
+  // Normalize a company name for loose comparison: drop a leading account-type
+  // prefix like "Corp - " / "Corporate - " / "Corp: ", lowercase, strip
+  // punctuation and entity suffixes, collapse whitespace. Lets the OTS name
+  // and the QBO "Corp - …" customer match on their core identity.
+  function normalizeCompany(name) {
+    return (name || '')
+      .replace(/&amp;/gi, '&')
+      .replace(/^\s*(corp(orate)?|company|acct|account)\s*[-:–—]\s*/i, '') // leading "Corp - "
+      .toLowerCase()
+      .replace(/\b(inc|llc|l\.l\.c|corp|co|ltd|company)\b\.?/gi, '')       // entity suffixes
+      .replace(/[.,&'"()]/g, ' ')                                          // punctuation
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  // Compare the OTS company name against one or more QBO candidate strings
+  // (the Customer field value, and each line of the Bill-to address). Passes
+  // if the core name matches ANY candidate. Returns details for the message.
+  function companyNamesMatch(otsName, qboCandidates) {
+    const a = normalizeCompany(otsName);
+    const cands = [].concat(qboCandidates).filter(Boolean);
+    if (!a || !cands.length) return { match: null, otsCore: a, matchedOn: '', qboCandidates: cands };
+    for (const c of cands) {
+      const b = normalizeCompany(c);
+      if (b && (a === b || a.includes(b) || b.includes(a))) {
+        return { match: true, otsCore: a, matchedOn: c, qboCandidates: cands };
+      }
+    }
+    return { match: false, otsCore: a, matchedOn: '', qboCandidates: cands };
+  }
+
+  // Pull the candidate company strings currently shown on the QBO invoice.
+  function qboCompanyCandidates() {
+    const out = [];
+    const cust = qFirst(QBO.customerInput);
+    if (cust && cust.value) out.push(cust.value.trim());
+    const bill = qFirst(QBO.billToInput);
+    if (bill && bill.value) {
+      // Each non-empty line of the Bill-to block is a candidate (name, company,
+      // street, city). The company line will match; the others simply won't.
+      bill.value.split('\n').map((s) => s.trim()).filter(Boolean).forEach((s) => out.push(s));
+    }
+    return out;
+  }
+
+  // Read one course row's student roster into ["Name (m/d/yy)", ...].
+  // Each enrollment is an <a> whose text is "First Last (6/29/26)" (status
+  // markers live in HTML comments, so textContent is already clean).
+  function readRoster(activityTd) {
+    const out = [];
+    activityTd.querySelectorAll('a[ng-href*="student_number"], a[href*="student_number"]').forEach((a) => {
+      const t = (a.textContent || '').replace(/\s+/g, ' ').trim();
+      if (t) out.push(t);
+    });
+    return out;
+  }
+
+  // Build the QBO description block for a course line, matching the example:
+  //   40 Hour HAZWOPER Online
+  //   STUDENT ID (SIGNUP DATE)
+  //   Richard Summers (5/22/26)
+  //   John Tipton (5/22/26)
+  function buildDescription(courseName, roster) {
+    const lines = [courseName];
+    if (roster.length) {
+      lines.push('STUDENT ID (SIGNUP DATE)');
+      roster.forEach((r) => lines.push(r));
+    }
+    return lines.join('\n');
+  }
+
+  // Billing ID lives in a header row: <th>BILLING ID</th><td>A&ME063026</td>.
+  // This becomes the QBO "Invoice no." (reference_number). Match the <th> by
+  // text so we don't depend on row position.
+  function corpBillingId() {
+    for (const th of document.querySelectorAll('th')) {
+      if (/^\s*billing\s*id\s*$/i.test(th.textContent || '')) {
+        const td = th.nextElementSibling;
+        const v = (td?.textContent || '').replace(/\s+/g, '').trim();
+        if (v) return v;
+      }
+    }
+    return '';
+  }
+
+  function captureCorporateInvoice() {
+    const meta = corpInvoiceMeta();
+    const lines = [];
+    const warnings = [];
+
+    // Course rows are the ng-repeat rows over ic.ClassData. The totals row has
+    // a colspan cell, so skip anything containing td[colspan].
+    const rows = document.querySelectorAll('tr[ng-repeat*="ClassData"]');
+    rows.forEach((tr) => {
+      if (tr.querySelector('td[colspan]')) return;
+      const tds = tr.querySelectorAll('td');
+      if (tds.length < 4) return;
+
+      const activityTd = tds[0];
+
+      // Item number: the copy-to-clipboard <a> inside the <strong> header,
+      // e.g. "0003-2219".
+      const itemLink = activityTd.querySelector('strong a[ng-click*="CopyToClipboard"], strong a');
+      const itemNumber = (itemLink?.textContent || '').replace(/\s+/g, '').trim();
+
+      // Course name: the <strong> text with the "(item#)" prefix stripped off.
+      let courseName = (activityTd.querySelector('strong')?.textContent || '')
+        .replace(/\s+/g, ' ')
+        .replace(/^\(\s*[\d-]+\s*\)\s*/, '')  // drop leading "(0003-2219) "
+        .trim();
+
+      if (!itemNumber || !courseName) return;
+
+      const roster = readRoster(activityTd);
+
+      // QTY / RATE / AMOUNT are the last three right-aligned cells before the
+      // trailing 20px spacer cell. Read from the end to stay robust.
+      const qty  = parseInt((tds[tds.length - 4].textContent || '').replace(/[^\d.-]/g, ''), 10);
+      const rate = parseMoney(tds[tds.length - 3].textContent);
+      const amt  = parseMoney(tds[tds.length - 2].textContent);
+
+      const sku = itemNumber + CORP_INVOICE_SUFFIX;
+      const qtyFinal = Number.isFinite(qty) && qty > 0 ? qty : (roster.length || 1);
+      const rateFinal = rate != null ? rate : (amt != null && qtyFinal ? +(amt / qtyFinal).toFixed(2) : 0);
+      const amtFinal = amt != null ? amt : +(qtyFinal * rateFinal).toFixed(2);
+
+      // Cross-check the roster count against the printed QTY.
+      if (roster.length && Number.isFinite(qty) && roster.length !== qty) {
+        warnings.push(`${sku}: ${roster.length} student(s) listed but QTY reads ${qty} — verify this line.`);
+      }
+      // Cross-check qty × rate against the printed amount.
+      if (rate != null && amt != null && Math.abs(qtyFinal * rateFinal - amtFinal) > 0.011) {
+        warnings.push(`${sku}: ${qtyFinal} × ${fmt(rateFinal)} ≠ ${fmt(amtFinal)} — verify this line.`);
+      }
+
+      lines.push({
+        sku,
+        courseName,
+        variant: 'Corporate',
+        qty: qtyFinal,
+        rate: rateFinal,
+        amount: amtFinal,
+        description: buildDescription(courseName, roster),
+        roster,
+      });
+    });
+
+    return {
+      source: 'corporate-invoice',
+      tab: meta.orgId ? `Corporate org ${meta.orgId}` : 'Corporate Invoice',
+      company: corpCompanyName(),
+      billingId: corpBillingId(),
+      meta,
+      capturedAt: new Date().toISOString(),
+      lines,
+      warnings,
+    };
+  }
+
+  // One-step placeholder tour. Per standing preference the ? button always
+  // exists; fuller steps can be dropped in here later.
+  const TOUR_STEPS_CORP = [
+    { selector: '#ots2qbo-capture',
+      text: 'This captures the corporate invoice shown on this page — one line per course, with student rosters — and saves it. Then open the customer\'s QBO invoice and click Fill. (More detailed tour steps coming soon.)' },
+  ];
+
+  function initCorpInvoicePage() {
+    injectStyles();
+    const meta = corpInvoiceMeta();
+    const range = (meta.startDate && meta.endDate) ? `${meta.startDate} – ${meta.endDate}` : '';
+    const body = `
+      <div>Org: <strong id="ots2qbo-corp-org">${meta.orgId || 'unknown'}</strong></div>
+      ${range ? `<div style="opacity:.85;margin-top:2px">Range: ${range}</div>` : ''}
+      <button class="ots2qbo-btn" id="ots2qbo-capture">Capture this invoice for QBO</button>
+      <div id="ots2qbo-status">Review the invoice, then click Capture.</div>
+    `;
+    buildPanel('OTS → QB Capture (Corporate)', body, TOUR_STEPS_CORP);
+
+    document.getElementById('ots2qbo-capture').addEventListener('click', () => {
+      const payload = captureCorporateInvoice();
+      if (!payload.lines.length) {
+        setStatus('No course lines found. Is the invoice fully loaded on this page?', true);
+        return;
+      }
+      GM_setValue(STORE_KEY, JSON.stringify(payload));
+      const total = payload.lines.reduce((s, l) => s + l.amount, 0);
+      const students = payload.lines.reduce((s, l) => s + (l.roster ? l.roster.length : 0), 0);
+      let msg = `Captured ${payload.lines.length} course line(s), ${students} student(s)` +
+                `${payload.company ? ' for ' + payload.company : ''}.\n` +
+                `${payload.billingId ? 'Billing ID / Invoice no.: ' + payload.billingId + '\n' : ''}` +
+                `Expected invoice total: ${fmt(total)}\nNow open this customer's QBO invoice and click Fill.`;
+      if (payload.warnings.length) msg += '\nWarning: ' + payload.warnings.join('\nWarning: ');
+      setStatus(msg, payload.warnings.length > 0);
+    });
+  }
+
+  /* ════════════════════════════════════════════════════════════════════
    *  PAGE B — QuickBooks Online invoice
    * ════════════════════════════════════════════════════════════════════ */
 
@@ -931,6 +1200,17 @@
       const rateEl = findRowFieldForLine(input, QBO.rateInput);
       if (rateEl) { rateEl.focus(); setNativeValue(rateEl, String(line.rate)); rateEl.blur(); await sleep(QBO.typeDelay); }
 
+      // Description (corporate invoices carry a course + roster block). Only
+      // written when the captured line actually has one, so daily-sales fills
+      // are unaffected. QBO usually auto-fills a default description on product
+      // select, so this overwrites it with our roster version.
+      if (line.description) {
+        stage = 'filling Description';
+        const descEl = findRowFieldForLine(input, QBO.descInput);
+        if (descEl) { descEl.focus(); setNativeValue(descEl, line.description); descEl.blur(); await sleep(QBO.typeDelay); }
+        else smartNote = (smartNote ? smartNote + '\n' : '') + `line ${idx + 1} (${line.sku}): description field not found — the course/roster text wasn't written.`;
+      }
+
       if (!qtyEl || !rateEl) {
         const w = `line ${idx + 1} (${line.sku}): product selected, but ${!qtyEl ? 'Qty' : ''}${!qtyEl && !rateEl ? ' & ' : ''}${!rateEl ? 'Rate' : ''} field not found — fill manually.`;
         return smartNote ? w + '\n' + smartNote : w;
@@ -948,6 +1228,7 @@
     const age = Math.round((Date.now() - new Date(payload.capturedAt)) / 60000);
     const total = payload.lines.reduce((s, l) => s + l.amount, 0);
     let header = `<div style="margin-bottom:6px"><strong>${payload.tab}</strong> · ${payload.lines.length} lines · ${total < 0 ? '-' : ''}${fmt(total)} · captured ${age} min ago</div>`;
+    if (payload.billingId) header += `<div style="margin-bottom:6px">Invoice no.: <strong>${payload.billingId}</strong></div>`;
     if (age > 120) header += `<div class="ots2qbo-neg" style="margin-bottom:6px">This capture is over 2 hours old — re-capture if the report has changed.</div>`;
     if (payload.filledAt) header += `<div class="ots2qbo-neg" style="margin-bottom:6px">Already filled once at ${new Date(payload.filledAt).toLocaleTimeString()} — filling again will add duplicate lines.</div>`;
     el.innerHTML = header +
@@ -955,7 +1236,7 @@
         `<div class="ots2qbo-line ${l.amount < 0 ? 'ots2qbo-neg' : ''}">
            ${variantBadge(l)}<br>
            <strong>${l.sku}</strong> — ${l.qty} @ ${l.rate < 0 ? '-' : ''}${fmt(l.rate)} = ${l.amount < 0 ? '-' : ''}${fmt(l.amount)}<br>
-           <small>${l.courseName}</small>
+           <small>${l.courseName}${l.roster && l.roster.length ? ` · ${l.roster.length} student${l.roster.length === 1 ? '' : 's'}` : ''}</small>
          </div>`).join('');
   }
 
@@ -1064,6 +1345,39 @@
       const missed = [];
       renderMissed([]);
       try {
+        // ── Verify we're on the right customer's invoice ──────────────────
+        // Loose core-name match against the QBO Customer field and Bill-to
+        // address. Warn (with the specific difference) but never block.
+        if (payload.company) {
+          const cands = qboCompanyCandidates();
+          const chk = companyNamesMatch(payload.company, cands);
+          if (chk.match === false) {
+            const qboShown = cands[0] || '(no customer set)';
+            const proceed = window.confirm(
+              'Customer name may not match this capture.\n\n' +
+              'OTS company : ' + payload.company + '\n' +
+              'QBO invoice : ' + qboShown + '\n\n' +
+              'Fill this invoice anyway?'
+            );
+            if (!proceed) { btn.disabled = false; setStatus('Fill cancelled — customer mismatch.', true); return; }
+            warnings.push(`Customer name mismatch — OTS "${payload.company}" vs QBO "${qboShown}". Filled anyway at your confirmation.`);
+          } else if (chk.match === null) {
+            warnings.push(`Could not read the QBO customer to verify against OTS "${payload.company}" — double-check you're on the right invoice.`);
+          }
+        }
+        // Set the Invoice no. from the OTS Billing ID first (once per run).
+        if (payload.billingId) {
+          const invNo = qFirst(QBO.invoiceNoInput);
+          if (invNo) {
+            invNo.focus(); setNativeValue(invNo, payload.billingId); invNo.blur();
+            await sleep(QBO.typeDelay);
+            if ((invNo.value || '').replace(/\s+/g, '') !== payload.billingId.replace(/\s+/g, '')) {
+              warnings.push(`Invoice no. may not have taken — set it to "${payload.billingId}" manually.`);
+            }
+          } else {
+            warnings.push(`Invoice no. field not found — set it to "${payload.billingId}" manually.`);
+          }
+        }
         for (let i = 0; i < payload.lines.length; i++) {
           const line = payload.lines[i];
           try {
@@ -1104,10 +1418,18 @@
   function boot() {
     if (document.getElementById('ots2qbo-panel')) return;
     if (location.hostname.includes('otsystems.net')) {
-      // Angular renders late — wait for the table
-      waitFor(() => document.querySelector('div[role="tabpanel"] table'), 20000)
-        .then(initReportPage)
-        .catch(() => initReportPage()); // show panel anyway
+      if (/\/corporateinvoice\/generate\.asp/i.test(location.pathname + location.search) ||
+          /\/corporateinvoice\//i.test(location.pathname) && /generate\.asp/i.test(location.href)) {
+        // Corporate invoice: Angular renders the ClassData table late.
+        waitFor(() => document.querySelector('tr[ng-repeat*="ClassData"]'), 20000)
+          .then(initCorpInvoicePage)
+          .catch(() => initCorpInvoicePage()); // show panel anyway
+      } else {
+        // Daily Transactions report
+        waitFor(() => document.querySelector('div[role="tabpanel"] table'), 20000)
+          .then(initReportPage)
+          .catch(() => initReportPage()); // show panel anyway
+      }
     } else if (location.hostname.includes('intuit.com')) {
       waitFor(() => document.querySelector('input[aria-label^="Product or service"]') || document.body, 20000)
         .then(initQboPage)
